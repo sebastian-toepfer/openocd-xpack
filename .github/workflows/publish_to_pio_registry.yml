@@ -1,0 +1,108 @@
+---
+name: Publish to platformio registry
+
+#trigger manually ... but should be on release!
+on:
+  workflow_dispatch:
+    inputs:
+      x-pack-openocd-version:
+        description: 'The semver of the release to publish'
+        required: true
+
+jobs:
+  publish:
+    permissions:
+      contents: read
+
+    name: publish to registry
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+        - org_arch: darwin-arm64
+          file_ext: tar.gz
+          pio_arch: darwin_arm64
+
+        - org_arch: darwin-x64
+          file_ext: tar.gz
+          pio_arch: darwin_x86_64
+
+        - org_arch: linux-arm64
+          file_ext: tar.gz
+          pio_arch: linux_aarch64
+
+        - org_arch: linux-x64
+          file_ext: tar.gz
+          pio_arch: linux_x86_64
+
+        - org_arch: win32-x64
+          file_ext: zip
+          pio_arch: windows_amd64
+
+    steps:
+    - name: Download release asset for ${{ matrix.pio_arch }}
+      run: |
+        gh release download v${{ github.event.inputs.x-pack-openocd-version }} \
+          --repo xpack-dev-tools/openocd-xpack \
+          --pattern 'xpack-openocd-${{ github.event.inputs.x-pack-openocd-version }}-${{ matrix.org_arch }}.${{ matrix.file_ext }}'
+
+    - name: Unpack release asset for ${{ matrix.pio_arch }}
+      run: |
+        sudo apt-get install -y --no-install-recommends libarchive-tools
+        bsdtar -xf xpack-openocd-${{ github.event.inputs.x-pack-openocd-version }}-${{ matrix.org_arch }}.${{ matrix.file_ext }}
+
+    - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 #v6.1.0
+      with:
+        path: |
+          ~/.cache/pip
+          ~/.platformio/.cache
+        key: ${{ runner.os }}-pio
+
+    - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 #v6.3.0
+      with:
+        python-version: '3.14'
+
+    - name: Install PlatformIO Core
+      run: pip install --upgrade platformio
+
+    - name: Determine package version
+      id: determine-package-version
+      run: |
+        VERSION="$(sed -E 's/^([0-9]+)\.([0-9]+)\.([0-9]+)-([0-9]+)$/\1.\2\3.\4/' <<< ${{ github.event.inputs.x-pack-openocd-version }})"
+        echo "version=${VERSION}" >> $GITHUB_OUTPUT
+
+    - name: Generate package.json
+      working-directory: xpack-openocd-${{ github.event.inputs.x-pack-openocd-version }}
+      run: |
+        cat > package.json << EOF
+        {
+          "name": "tool-openocd",
+          "version": "${VERSION}",
+          "description": "Open On-Chip Debugger. Free and Open On-Chip Debugging, In-System Programming and Boundary-Scan Testing",
+          "keywords": [
+            "tools",
+            "debugger",
+            "debug server",
+            "uploader"
+          ],
+          "homepage": "https://xpack-dev-tools.github.io/openocd-xpack",
+          "license": "GPL-2.0-or-later",
+          "repository": {
+            "type": "git",
+            "url": "https://github.com/sebastian-toepfer/openocd-xpack"
+          },
+          "system": [
+            "${{ matrix.pio_arch }}"
+          ]
+        }
+        EOF
+      env:
+        VERSION: ${{ steps.determine-package-version.outputs.version }}
+
+    - name: Publish package
+      working-directory: xpack-openocd-${{ github.event.inputs.x-pack-openocd-version }}
+      run: pio pkg publish --no-interactive
+      env:
+        PLATFORMIO_AUTH_TOKEN: ${{ secrets.PIO_PAT}}
